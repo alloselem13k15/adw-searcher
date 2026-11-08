@@ -1,0 +1,498 @@
+// ADW Intelligence — Schéma Prisma complet
+// Base de données PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Rôles utilisateur ─────────────────────────────────────────
+enum Role {
+  USER
+  ADMIN
+  OWNER
+}
+
+// ── Statut du compte ──────────────────────────────────────────
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+  DELETED
+}
+
+// ── Plans d'abonnement ────────────────────────────────────────
+enum SubscriptionPlan {
+  FREE
+  BASIC
+  PREMIUM
+  BUSINESS
+}
+
+// ── Statut d'abonnement ───────────────────────────────────────
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  EXPIRED
+  PAST_DUE
+  TRIALING
+}
+
+// ── Statut de ticket ──────────────────────────────────────────
+enum TicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// ── Priorité de ticket ────────────────────────────────────────
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+// ── Type de log d'audit ───────────────────────────────────────
+enum AuditAction {
+  USER_CREATED
+  USER_UPDATED
+  USER_DELETED
+  USER_SUSPENDED
+  USER_REACTIVATED
+  USER_LOGIN
+  USER_LOGOUT
+  USER_LOGIN_FAILED
+  PASSWORD_CHANGED
+  PASSWORD_RESET
+  EMAIL_VERIFIED
+  TWO_FACTOR_ENABLED
+  TWO_FACTOR_DISABLED
+  API_KEY_CREATED
+  API_KEY_REVOKED
+  SEARCH_PERFORMED
+  SUBSCRIPTION_CREATED
+  SUBSCRIPTION_UPDATED
+  SUBSCRIPTION_CANCELED
+  PAYMENT_SUCCEEDED
+  PAYMENT_FAILED
+  TICKET_CREATED
+  TICKET_UPDATED
+  TICKET_RESOLVED
+  ADMIN_ACTION
+  OWNER_ACTION
+  SETTINGS_CHANGED
+  ROLE_ASSIGNED
+  ROLE_REVOKED
+}
+
+// ── Utilisateur ───────────────────────────────────────────────
+model User {
+  id                    String          @id @default(cuid())
+  email                 String          @unique
+  emailVerified         DateTime?
+  emailVerificationToken String?        @unique
+  password              String          // Argon2id hash
+  firstName             String
+  lastName              String
+  avatar                String?
+  role                  Role            @default(USER)
+  status                AccountStatus   @default(PENDING_VERIFICATION)
+  twoFactorEnabled      Boolean         @default(false)
+  twoFactorSecret       String?         // Chiffré
+  backupCodes           String[]        // Chiffrés
+  credits               Int             @default(0)
+  creditsUsed           Int             @default(0)
+  language              String          @default("fr")
+  timezone              String          @default("Europe/Paris")
+  marketingEmails       Boolean         @default(true)
+  stripeCustomerId      String?         @unique
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  lastLoginAt           DateTime?
+  deletedAt             DateTime?
+
+  // Relations
+  sessions              Session[]
+  apiKeys               ApiKey[]
+  searches              SearchHistory[]
+  subscription          Subscription?
+  invoices              Invoice[]
+  tickets               Ticket[]
+  ticketMessages        TicketMessage[]
+  notifications         Notification[]
+  loginHistory          LoginHistory[]
+  auditLogs             AuditLog[]       @relation("UserAuditLogs")
+  adminAuditLogs        AuditLog[]       @relation("AdminAuditLogs")
+  passwordResets        PasswordReset[]
+  cookieConsent         CookieConsent?
+  gdprRequests          GdprRequest[]
+  deviceSessions        DeviceSession[]
+
+  @@map("users")
+  @@index([email])
+  @@index([role])
+  @@index([status])
+  @@index([stripeCustomerId])
+}
+
+// ── Session JWT ───────────────────────────────────────────────
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  refreshToken String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  ipAddress    String?
+  userAgent    String?
+  revoked      Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+  @@index([userId])
+  @@index([refreshToken])
+}
+
+// ── Appareil connecté ─────────────────────────────────────────
+model DeviceSession {
+  id           String   @id @default(cuid())
+  userId       String
+  deviceName   String?
+  deviceType   String?
+  browser      String?
+  os           String?
+  ipAddress    String?
+  location     String?
+  lastActiveAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+  isCurrent    Boolean  @default(false)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("device_sessions")
+  @@index([userId])
+}
+
+// ── Réinitialisation de mot de passe ─────────────────────────
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_resets")
+  @@index([token])
+  @@index([userId])
+}
+
+// ── Clé API ───────────────────────────────────────────────────
+model ApiKey {
+  id          String    @id @default(cuid())
+  userId      String
+  name        String
+  keyPrefix   String    // Ex: "adw_live_"
+  keyHash     String    @unique // Hash de la clé
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  permissions String[]  @default(["search:read"])
+  usageCount  Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user     User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  usageLogs ApiKeyUsageLog[]
+
+  @@map("api_keys")
+  @@index([userId])
+  @@index([keyHash])
+}
+
+// ── Log d'utilisation des clés API ───────────────────────────
+model ApiKeyUsageLog {
+  id         String   @id @default(cuid())
+  apiKeyId   String
+  endpoint   String
+  method     String
+  statusCode Int
+  ipAddress  String?
+  duration   Int?     // ms
+  createdAt  DateTime @default(now())
+
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@map("api_key_usage_logs")
+  @@index([apiKeyId])
+  @@index([createdAt])
+}
+
+// ── Historique de recherche ───────────────────────────────────
+model SearchHistory {
+  id         String   @id @default(cuid())
+  userId     String
+  query      String
+  queryType  String   // "person", "phone", "email", "ip", etc.
+  resultCount Int     @default(0)
+  creditsUsed Int     @default(1)
+  success    Boolean  @default(true)
+  errorCode  String?
+  ipAddress  String?
+  duration   Int?     // ms
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("search_history")
+  @@index([userId])
+  @@index([createdAt])
+  @@index([queryType])
+}
+
+// ── Abonnement ────────────────────────────────────────────────
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String             @unique
+  plan                 SubscriptionPlan   @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodStart   DateTime           @default(now())
+  currentPeriodEnd     DateTime
+  cancelAtPeriodEnd    Boolean            @default(false)
+  canceledAt           DateTime?
+  creditsPerMonth      Int                @default(10)
+  creditsUsedThisMonth Int                @default(0)
+  searchesPerDay       Int                @default(10)
+  searchesUsedToday    Int                @default(0)
+  lastResetAt          DateTime           @default(now())
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@map("subscriptions")
+  @@index([userId])
+  @@index([stripeSubscriptionId])
+}
+
+// ── Facture ───────────────────────────────────────────────────
+model Invoice {
+  id               String   @id @default(cuid())
+  userId           String
+  subscriptionId   String?
+  stripeInvoiceId  String?  @unique
+  amount           Int      // Centimes
+  currency         String   @default("eur")
+  status           String   // "paid", "open", "void", "uncollectible"
+  invoiceUrl       String?
+  invoicePdf       String?
+  description      String?
+  periodStart      DateTime?
+  periodEnd        DateTime?
+  paidAt           DateTime?
+  createdAt        DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@map("invoices")
+  @@index([userId])
+  @@index([stripeInvoiceId])
+}
+
+// ── Ticket de support ─────────────────────────────────────────
+model Ticket {
+  id          String         @id @default(cuid())
+  userId      String
+  subject     String
+  category    String         // "billing", "technical", "account", "general"
+  priority    TicketPriority @default(MEDIUM)
+  status      TicketStatus   @default(OPEN)
+  assignedTo  String?
+  resolvedAt  DateTime?
+  closedAt    DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages TicketMessage[]
+
+  @@map("tickets")
+  @@index([userId])
+  @@index([status])
+  @@index([priority])
+}
+
+// ── Message de ticket ─────────────────────────────────────────
+model TicketMessage {
+  id          String   @id @default(cuid())
+  ticketId    String
+  userId      String
+  content     String
+  attachments Json?    // [{name, url, size, type}]
+  isInternal  Boolean  @default(false) // Note interne admin
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@map("ticket_messages")
+  @@index([ticketId])
+  @@index([userId])
+}
+
+// ── Notification ──────────────────────────────────────────────
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  content   String
+  type      String   // "info", "success", "warning", "error"
+  link      String?
+  read      Boolean  @default(false)
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+  @@index([userId])
+  @@index([read])
+}
+
+// ── Historique de connexion ───────────────────────────────────
+model LoginHistory {
+  id          String   @id @default(cuid())
+  userId      String
+  success     Boolean
+  ipAddress   String?
+  userAgent   String?
+  location    String?
+  failReason  String?
+  twoFactorUsed Boolean @default(false)
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("login_history")
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ── Journal d'audit ───────────────────────────────────────────
+model AuditLog {
+  id          String      @id @default(cuid())
+  userId      String?     // Utilisateur cible
+  adminId     String?     // Admin ayant effectué l'action
+  action      AuditAction
+  resource    String?     // Table/ressource affectée
+  resourceId  String?     // ID de la ressource
+  oldValue    Json?
+  newValue    Json?
+  ipAddress   String?
+  userAgent   String?
+  metadata    Json?
+  createdAt   DateTime    @default(now())
+
+  user  User? @relation("UserAuditLogs", fields: [userId], references: [id])
+  admin User? @relation("AdminAuditLogs", fields: [adminId], references: [id])
+
+  @@map("audit_logs")
+  @@index([userId])
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ── Consentement cookies ──────────────────────────────────────
+model CookieConsent {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  essential   Boolean  @default(true)
+  functional  Boolean  @default(false)
+  analytics   Boolean  @default(false)
+  marketing   Boolean  @default(false)
+  consentedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  ipAddress   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("cookie_consents")
+}
+
+// ── Demande RGPD ──────────────────────────────────────────────
+model GdprRequest {
+  id          String   @id @default(cuid())
+  userId      String
+  type        String   // "access", "rectification", "deletion", "export", "restriction"
+  status      String   @default("pending") // "pending", "processing", "completed", "rejected"
+  description String?
+  processedAt DateTime?
+  processedBy String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("gdpr_requests")
+  @@index([userId])
+}
+
+// ── Annonce système ───────────────────────────────────────────
+model Announcement {
+  id          String    @id @default(cuid())
+  title       String
+  content     String
+  type        String    @default("info") // "info", "warning", "maintenance"
+  targetRole  Role?     // null = tous les utilisateurs
+  publishedAt DateTime  @default(now())
+  expiresAt   DateTime?
+  createdBy   String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@map("announcements")
+}
+
+// ── Paramètres système ────────────────────────────────────────
+model SystemSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  type      String   @default("string") // "string", "number", "boolean", "json"
+  group     String   @default("general")
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+// ── Signalement ───────────────────────────────────────────────
+model Report {
+  id          String   @id @default(cuid())
+  reporterId  String
+  targetType  String   // "user", "content"
+  targetId    String
+  reason      String
+  description String?
+  status      String   @default("pending")
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@map("reports")
+  @@index([status])
+}
